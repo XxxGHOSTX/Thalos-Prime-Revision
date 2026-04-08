@@ -1,0 +1,7 @@
+Metadata-Version: 2.1
+Name: thalos-prime
+Version: 0.1.0
+Summary: Autonomous Epistemic Compiler with SBI integration
+Requires-Python: >=3.10
+Provides-Extra: dev
+License-File: LICENSE

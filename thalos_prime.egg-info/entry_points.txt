@@ -1,0 +1,2 @@
+[console_scripts]
+thalos-prime = thalos_prime.core:main
