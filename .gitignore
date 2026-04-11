@@ -1,0 +1,5 @@
+thalos.db
+thalos_data/
+__pycache__/
+*.pyc
+*.egg-info/
