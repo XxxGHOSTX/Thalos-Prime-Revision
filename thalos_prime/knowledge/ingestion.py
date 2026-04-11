@@ -9,6 +9,7 @@ normalising it into Claim objects, and queuing it for verification.
 from __future__ import annotations
 
 import re
+import uuid
 from typing import Any
 
 from thalos_prime.models import Claim, ClaimStatus, SourceRecord, SourceType
@@ -102,8 +103,6 @@ class IngestionPipeline:
         metadata: dict[str, Any] | None = None,
     ) -> Claim:
         """Ingest a single plain-text claim."""
-        import uuid
-
         source = SourceRecord(
             source_id=str(uuid.uuid4()),
             source_type=source_type,
@@ -121,11 +120,15 @@ class IngestionPipeline:
         default_source_uri: str = "batch://unknown",
         default_reliability: float = 0.5,
     ) -> list[Claim]:
-        """Ingest a batch of dict-encoded claims."""
-        import uuid
+        """
+        Ingest a batch of dict-encoded claims.
 
+        Input dicts are *not* mutated; a shallow copy is taken so the
+        ``source`` key remains intact in the caller's data.
+        """
         claims: list[Claim] = []
-        for record in records:
+        for raw in records:
+            record = dict(raw)  # shallow copy – prevents mutating caller's data
             source_info = record.pop("source", {})
             source = SourceRecord(
                 source_id=str(uuid.uuid4()),

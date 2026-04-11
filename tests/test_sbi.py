@@ -216,3 +216,59 @@ class TestMicrocircuitController:
         assert "queue_depth" in s
         assert "memory_utilisation" in s
         assert "signals_routed" in s
+
+
+# ---------------------------------------------------------------------------
+# MicrocircuitController bottleneck callback tests (new)
+# ---------------------------------------------------------------------------
+
+
+class TestMicrocircuitBottleneckCallback:
+    def test_bottleneck_increments_counter(self):
+        from thalos_prime.sbi.microcircuit import MicrocircuitController
+        ctrl = MicrocircuitController()
+        for i in range(MicrocircuitController.BOTTLENECK_QUEUE_DEPTH + 5):
+            ctrl.enqueue({"data": i})
+        assert ctrl._bottleneck_count >= 1
+
+    def test_bottleneck_triggers_growth_callback(self):
+        from thalos_prime.sbi.microcircuit import MicrocircuitController
+        from thalos_prime.sbi.organoid import OrganoidNetwork
+
+        net = OrganoidNetwork(initial_clusters=2)
+        # Saturate clusters so growth can happen
+        for c in net.clusters:
+            c.load = c.capacity
+        before = net.cluster_count
+        ctrl = MicrocircuitController(growth_callback=net.trigger_growth)
+        for i in range(MicrocircuitController.BOTTLENECK_QUEUE_DEPTH + 1):
+            ctrl.enqueue({"data": i})
+        # At least one bottleneck event should have been processed
+        assert ctrl._bottleneck_count >= 1
+        log_entry = next(
+            (e for e in ctrl._signal_log if e.get("event") == "bottleneck_detected"),
+            None,
+        )
+        assert log_entry is not None
+        assert log_entry["growth_triggered"] is True
+
+    def test_no_callback_still_logs_event(self):
+        from thalos_prime.sbi.microcircuit import MicrocircuitController
+        ctrl = MicrocircuitController(growth_callback=None)
+        for i in range(MicrocircuitController.BOTTLENECK_QUEUE_DEPTH + 1):
+            ctrl.enqueue({"data": i})
+        log_entry = next(
+            (e for e in ctrl._signal_log if e.get("event") == "bottleneck_detected"),
+            None,
+        )
+        assert log_entry is not None
+        assert log_entry["growth_triggered"] is False
+
+    def test_bottleneck_count_in_status(self):
+        from thalos_prime.sbi.microcircuit import MicrocircuitController
+        ctrl = MicrocircuitController()
+        for i in range(MicrocircuitController.BOTTLENECK_QUEUE_DEPTH + 1):
+            ctrl.enqueue({"data": i})
+        status = ctrl.status()
+        assert "bottleneck_events" in status
+        assert status["bottleneck_events"] >= 1

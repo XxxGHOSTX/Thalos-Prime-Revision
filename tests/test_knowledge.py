@@ -401,3 +401,41 @@ class TestInsightEngine:
         engine.analyse([ko])
         engine.clear()
         assert len(engine.all_insights) == 0
+
+
+# ---------------------------------------------------------------------------
+# Ingestion mutation fix tests (new)
+# ---------------------------------------------------------------------------
+
+
+class TestIngestionBatchNoMutation:
+    def test_ingest_batch_does_not_mutate_input(self):
+        pipeline = IngestionPipeline()
+        records = [
+            {"content": "test claim", "source": {"reliability": 0.8, "uri": "test://x"}},
+            {"content": "another claim", "source": {"reliability": 0.6}},
+        ]
+        # Keep a copy of the original key set
+        original_keys = [set(r.keys()) for r in records]
+        pipeline.ingest_batch(records)
+        for i, record in enumerate(records):
+            assert set(record.keys()) == original_keys[i], (
+                f"Record {i} was mutated: {set(record.keys())} != {original_keys[i]}"
+            )
+
+    def test_ingest_batch_source_key_preserved(self):
+        pipeline = IngestionPipeline()
+        record = {"content": "claim", "source": {"reliability": 0.75}}
+        pipeline.ingest_batch([record])
+        assert "source" in record
+        assert record["source"]["reliability"] == 0.75
+
+    def test_ingest_batch_can_be_called_twice_with_same_records(self):
+        """Calling ingest_batch twice with the same list must not raise or mutate."""
+        pipeline = IngestionPipeline()
+        records = [{"content": "reusable claim", "source": {"reliability": 0.7}}]
+        claims1 = pipeline.ingest_batch(records)
+        claims2 = pipeline.ingest_batch(records)
+        assert len(claims1) == 1
+        assert len(claims2) == 1
+        assert claims1[0].content == claims2[0].content

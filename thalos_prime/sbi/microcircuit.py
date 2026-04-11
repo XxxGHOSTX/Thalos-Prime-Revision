@@ -8,7 +8,7 @@ digital knowledge processing pipeline.
 Microcircuits:
 - Route signals between organoid clusters
 - Handle analogue-to-digital conversion (simulated)
-- Detect bottlenecks and trigger growth events
+- Detect bottlenecks and trigger growth events via callback
 - Provide long-term memory via a synthetic storage buffer
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -75,17 +76,29 @@ class MicrocircuitController:
     Responsibilities:
     - Register and manage channels between organoid clusters
     - Route knowledge payloads to the appropriate cluster
-    - Detect bottlenecks (high queue depth)
+    - Detect bottlenecks (high queue depth) and invoke a growth callback
     - Maintain a SynapticBuffer for long-term memory
     """
 
     BOTTLENECK_QUEUE_DEPTH = 50
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        growth_callback: Callable[[], Any] | None = None,
+    ) -> None:
+        """
+        Args:
+            growth_callback: Called whenever a queue-depth bottleneck is
+                detected.  In a live deployment this would be wired to
+                ``OrganoidNetwork.trigger_growth()`` so the network
+                automatically expands its processing capacity.
+        """
         self._channels: dict[str, MicrocircuitChannel] = {}
         self._queue: list[dict[str, Any]] = []
         self._memory = SynapticBuffer()
         self._signal_log: list[dict[str, Any]] = []
+        self._growth_callback: Callable[[], Any] | None = growth_callback
+        self._bottleneck_count: int = 0
 
     # ------------------------------------------------------------------
     # Channel management
@@ -157,6 +170,7 @@ class MicrocircuitController:
             "queue_depth": len(self._queue),
             "memory_utilisation": self._memory.utilisation,
             "signals_routed": len(self._signal_log),
+            "bottleneck_events": self._bottleneck_count,
         }
 
     @property
@@ -172,11 +186,28 @@ class MicrocircuitController:
         return str(sorted(payload.items()))
 
     def _on_bottleneck(self) -> None:
-        """Called when queue depth exceeds threshold – log the event."""
-        self._signal_log.append(
-            {
-                "event": "bottleneck_detected",
-                "queue_depth": len(self._queue),
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            }
-        )
+        """
+        Called when queue depth exceeds threshold.
+
+        Logs the event *and* invokes the growth callback (if registered)
+        so that the organoid network can autonomously provision new
+        processing capacity.
+        """
+        self._bottleneck_count += 1
+        event: dict[str, Any] = {
+            "event": "bottleneck_detected",
+            "queue_depth": len(self._queue),
+            "bottleneck_number": self._bottleneck_count,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        }
+        if self._growth_callback is not None:
+            try:
+                growth_result = self._growth_callback()
+                event["growth_triggered"] = True
+                event["new_cluster_spawned"] = bool(growth_result)
+            except Exception as exc:
+                event["growth_triggered"] = False
+                event["growth_error"] = str(exc)
+        else:
+            event["growth_triggered"] = False
+        self._signal_log.append(event)

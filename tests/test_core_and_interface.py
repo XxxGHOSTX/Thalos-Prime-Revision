@@ -242,3 +242,203 @@ class TestFastAPIEndpoints:
         data = resp.json()
         assert "local_node_id" in data
         assert "peers" in data
+
+    def test_put_claim_endpoint(self, client):
+        tc, core = client
+        ko = core.ingest("original content", reliability=0.8)
+        resp = tc.put(
+            f"/claims/{ko.object_id}",
+            json={"content": "updated content", "reliability": 0.9},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["object_id"] == ko.object_id
+        assert data["versions"] >= 2
+
+    def test_put_claim_not_found(self, client):
+        tc, _ = client
+        resp = tc.put(
+            "/claims/nonexistent-id",
+            json={"content": "update", "reliability": 0.8},
+        )
+        assert resp.status_code == 404
+
+    def test_delete_claim_endpoint(self, client):
+        tc, core = client
+        ko = core.ingest("to be deleted", reliability=0.8)
+        resp = tc.delete(f"/claims/{ko.object_id}")
+        assert resp.status_code == 204
+        assert core.repository.get(ko.object_id) is None
+
+    def test_delete_claim_not_found(self, client):
+        tc, _ = client
+        resp = tc.delete("/claims/nonexistent-id")
+        assert resp.status_code == 404
+
+    def test_claim_versions_endpoint(self, client):
+        tc, core = client
+        ko = core.ingest("versioned claim", reliability=0.8)
+        # Create a second version via the repository
+        core.repository.put(ko, reason="manual_update")
+        resp = tc.get(f"/claims/{ko.object_id}/versions")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["version_count"] >= 2
+        assert isinstance(data["versions"], list)
+        assert "version_number" in data["versions"][0]
+
+    def test_claim_versions_not_found(self, client):
+        tc, _ = client
+        resp = tc.get("/claims/nonexistent-id/versions")
+        assert resp.status_code == 404
+
+    def test_register_node_endpoint(self, client):
+        tc, _ = client
+        resp = tc.post(
+            "/nodes",
+            json={"host": "10.0.0.5", "port": 9001, "public_key_pem": ""},
+        )
+        assert resp.status_code == 201
+        data = resp.json()
+        assert data["registered"] is True
+        assert data["host"] == "10.0.0.5"
+
+    def test_node_heartbeat_endpoint(self, client):
+        tc, core = client
+        from thalos_prime.models import NodeInfo
+        peer = NodeInfo(host="10.0.0.6", port=9002)
+        core.register_peer(peer)
+        resp = tc.post(f"/nodes/{peer.node_id}/heartbeat")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "heartbeat_received"
+
+    def test_node_heartbeat_not_found(self, client):
+        tc, _ = client
+        resp = tc.post("/nodes/nonexistent-node/heartbeat")
+        assert resp.status_code == 404
+
+    def test_prune_nodes_endpoint(self, client):
+        tc, _ = client
+        resp = tc.post("/nodes/prune")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "stale_nodes_marked_offline" in data
+
+    def test_sync_get_endpoint(self, client):
+        tc, core = client
+        core.ingest("sync test claim", reliability=0.85)
+        resp = tc.get("/sync")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "payload_b64" in data
+        assert "sender_node_id" in data
+        assert data["knowledge_objects"] >= 1
+
+    def test_sync_post_endpoint(self, client):
+        import base64
+        tc, core = client
+        core.ingest("claim to sync", reliability=0.8)
+        encrypted = core.prepare_sync_payload()
+        resp = tc.post(
+            "/sync",
+            json={"payload_b64": base64.b64encode(encrypted).decode()},
+        )
+        assert resp.status_code == 200
+        assert "merged_objects" in resp.json()
+
+    def test_sync_post_invalid_payload(self, client):
+        tc, _ = client
+        resp = tc.post("/sync", json={"payload_b64": "!!!not-base64!!!"})
+        assert resp.status_code == 400
+
+    def test_optimiser_endpoint(self, client):
+        tc, _ = client
+        resp = tc.get("/optimiser")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "network" in data
+        assert "actions_taken" in data
+
+    def test_monitor_endpoint(self, client):
+        tc, core = client
+        core.ingest("monitor test claim", reliability=0.8)
+        resp = tc.get("/monitor")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "timestamp" in data
+        assert "knowledge_repository" in data
+        assert "organoid_network" in data
+        assert "nodes" in data
+
+    def test_monitor_history_endpoint(self, client):
+        tc, core = client
+        # Build up some snapshots
+        core.monitor.snapshot()
+        core.monitor.snapshot()
+        resp = tc.get("/monitor/history?limit=5")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert "snapshots" in data
+        assert data["count"] >= 2
+
+
+# ---------------------------------------------------------------------------
+# ThalosCore additional tests (new)
+# ---------------------------------------------------------------------------
+
+
+class TestThalosCoreMonitor:
+    def test_monitor_attribute_exists(self):
+        core = ThalosCore(organoid_clusters=2)
+        assert hasattr(core, "monitor")
+
+    def test_monitor_snapshot_structure(self):
+        core = ThalosCore(organoid_clusters=2)
+        core.ingest("test", reliability=0.8)
+        snap = core.monitor.snapshot()
+        assert "timestamp" in snap
+        assert "knowledge_repository" in snap
+        assert "organoid_network" in snap
+        assert "microcircuit" in snap
+        assert "optimiser" in snap
+        assert "nodes" in snap
+        assert "insights" in snap
+
+    def test_monitor_recent_snapshots(self):
+        core = ThalosCore(organoid_clusters=2)
+        core.monitor.snapshot()
+        core.monitor.snapshot()
+        recent = core.monitor.recent_snapshots(n=5)
+        assert len(recent) == 2
+
+
+class TestThalosCoreSignedSync:
+    def test_sync_payload_signed_by_default(self):
+        core = ThalosCore(organoid_clusters=2)
+        core.ingest("signed sync test", reliability=0.9)
+        core.prepare_sync_payload()
+        log = core.synchronizer.sync_log
+        assert any(entry.get("signed") for entry in log)
+
+    def test_register_peer_stores_public_key(self):
+        from thalos_prime.autonomy.encryption import AsymmetricEncryption
+        core = ThalosCore(organoid_clusters=2)
+        peer_crypto = AsymmetricEncryption()
+        peer_node = NodeInfo(
+            host="10.0.0.3",
+            port=9005,
+            public_key_pem=peer_crypto.public_key_pem(),
+        )
+        core.register_peer(peer_node)
+        # The synchronizer should now have the peer's public key
+        assert peer_node.node_id in core.synchronizer._public_key_store
+
+
+class TestCLIMain:
+    def test_main_is_callable(self):
+        from thalos_prime.core import main
+        assert callable(main)
+
+    def test_main_exists_in_module(self):
+        import thalos_prime.core as core_mod
+        assert hasattr(core_mod, "main")

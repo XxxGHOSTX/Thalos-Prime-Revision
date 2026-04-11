@@ -9,7 +9,7 @@ together into a single, autonomous knowledge-processing pipeline:
       ↓                                                      ↓
   SBI Evaluation ←────────────────────────── Insight Engine
       ↓
-  Node Synchronisation (encrypted)
+  Node Synchronisation (AES-256-GCM encrypted + RSA-PSS signed)
       ↓
   Self-Optimisation
 """
@@ -22,6 +22,7 @@ from typing import Any
 from thalos_prime.autonomy.encryption import AsymmetricEncryption
 from thalos_prime.autonomy.node import NodeRegistry, NodeSynchronizer
 from thalos_prime.autonomy.optimizer import SelfOptimiser
+from thalos_prime.interface.monitor import SystemMonitor
 from thalos_prime.knowledge.contradiction import ContradictionResolver, ResolutionStrategy
 from thalos_prime.knowledge.ingestion import IngestionPipeline
 from thalos_prime.knowledge.insight import InsightEngine
@@ -66,12 +67,22 @@ class ThalosCore:
 
         # --- SBI layer ---
         self.organoid_network = OrganoidNetwork(initial_clusters=organoid_clusters)
-        self.microcircuit = MicrocircuitController()
+        # Wire bottleneck detection → organoid growth
+        self.microcircuit = MicrocircuitController(
+            growth_callback=self.organoid_network.trigger_growth
+        )
 
         # --- Autonomy layer ---
         self.node_registry = NodeRegistry(local_node=local_node)
-        self.synchronizer = NodeSynchronizer(local_node=local_node)
+        # Sign outgoing sync messages with this node's RSA private key
+        self.synchronizer = NodeSynchronizer(
+            local_node=local_node,
+            signing_key=self._crypto,
+        )
         self.optimiser = SelfOptimiser(network=self.organoid_network)
+
+        # --- Monitoring ---
+        self.monitor = SystemMonitor(core=self)
 
     # ------------------------------------------------------------------
     # Primary ingestion API
@@ -169,9 +180,12 @@ class ThalosCore:
 
     def register_peer(self, node: NodeInfo) -> None:
         self.node_registry.register(node)
+        # Register the peer's public key so we can verify their signatures
+        if node.public_key_pem:
+            self.synchronizer.register_peer_public_key(node.node_id, node.public_key_pem)
 
     def prepare_sync_payload(self) -> bytes:
-        """Produce an encrypted sync message from recent knowledge."""
+        """Produce an encrypted, signed sync message from recent knowledge."""
         delta = [
             {
                 "object_id": ko.object_id,
@@ -235,3 +249,60 @@ class ThalosCore:
             "insights_generated": len(self.insight_engine.all_insights),
             "optimiser_actions": len(self.optimiser.action_history),
         }
+
+
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
+
+
+def main() -> None:
+    """
+    Start the Thalos Prime API server.
+
+    Usage::
+
+        thalos-prime [--host HOST] [--port PORT] [--persist PATH]
+                     [--clusters N]
+    """
+    import argparse
+
+    try:
+        import uvicorn
+    except ImportError:
+        print("uvicorn is required to run the server. Install it with: pip install uvicorn")
+        raise SystemExit(1)
+
+    from thalos_prime.interface.api import create_app
+
+    parser = argparse.ArgumentParser(
+        description="Thalos Prime – Autonomous Epistemic Compiler"
+    )
+    parser.add_argument("--host", default="0.0.0.0", help="Bind host (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=8080, help="Bind port (default: 8080)")
+    parser.add_argument(
+        "--persist", default=None, metavar="PATH",
+        help="JSON file for persistent knowledge storage",
+    )
+    parser.add_argument(
+        "--clusters", type=int, default=4,
+        help="Initial organoid cluster count (default: 4)",
+    )
+    args = parser.parse_args()
+
+    core = ThalosCore(
+        node_host=args.host,
+        node_port=args.port,
+        persist_path=args.persist,
+        organoid_clusters=args.clusters,
+    )
+    app = create_app(core)
+    print(f"Thalos Prime starting on http://{args.host}:{args.port}")
+    print(f"  Node ID  : {core.node_registry.local_node.node_id}")
+    print(f"  Clusters : {core.organoid_network.cluster_count}")
+    print(f"  Persist  : {args.persist or 'in-memory (no persistence)'}")
+    uvicorn.run(app, host=args.host, port=args.port)
+
+
+if __name__ == "__main__":
+    main()

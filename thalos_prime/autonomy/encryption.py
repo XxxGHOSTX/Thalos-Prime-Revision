@@ -4,6 +4,10 @@ End-to-End Encryption Utilities
 
 Provides symmetric (AES-256-GCM) and asymmetric (RSA-2048) encryption
 for inter-node communication and knowledge object storage.
+
+Signing:
+  Messages are signed with RSA-PSS (SHA-256) so that recipients can
+  verify the authenticity and integrity of every sync packet.
 """
 
 from __future__ import annotations
@@ -11,6 +15,7 @@ from __future__ import annotations
 import base64
 import os
 
+from cryptography.exceptions import InvalidSignature
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import padding, rsa
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -147,3 +152,64 @@ class AsymmetricEncryption:
                 label=None,
             ),
         )
+
+    # ------------------------------------------------------------------
+    # Digital signatures (RSA-PSS with SHA-256)
+    # ------------------------------------------------------------------
+
+    def sign(self, message: bytes) -> bytes:
+        """
+        Sign *message* with this node's RSA private key using PSS padding.
+
+        Returns raw signature bytes (not base-64 encoded).
+        """
+        return self._private_key.sign(
+            message,
+            padding.PSS(
+                mgf=padding.MGF1(hashes.SHA256()),
+                salt_length=padding.PSS.MAX_LENGTH,
+            ),
+            hashes.SHA256(),
+        )
+
+    def verify(self, message: bytes, signature: bytes) -> bool:
+        """
+        Verify *signature* over *message* using this node's public key.
+
+        Returns True on success, False if the signature is invalid.
+        """
+        try:
+            self._public_key.verify(
+                signature,
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            return True
+        except InvalidSignature:
+            return False
+
+    @staticmethod
+    def verify_with_public_pem(message: bytes, signature: bytes, public_pem: str) -> bool:
+        """
+        Verify *signature* over *message* using a PEM-encoded public key.
+
+        Returns True on success, False on any failure.
+        """
+        try:
+            pub_key = serialization.load_pem_public_key(public_pem.encode())
+            pub_key.verify(  # type: ignore[union-attr]
+                signature,
+                message,
+                padding.PSS(
+                    mgf=padding.MGF1(hashes.SHA256()),
+                    salt_length=padding.PSS.MAX_LENGTH,
+                ),
+                hashes.SHA256(),
+            )
+            return True
+        except (InvalidSignature, Exception):
+            return False

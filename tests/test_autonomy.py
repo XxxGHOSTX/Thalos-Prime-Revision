@@ -241,3 +241,127 @@ class TestSelfOptimiser:
         assert "network" in report
         assert "actions_taken" in report
         assert "last_actions" in report
+
+
+# ---------------------------------------------------------------------------
+# RSA-PSS signing tests (new)
+# ---------------------------------------------------------------------------
+
+
+class TestAsymmetricSigning:
+    def test_sign_and_verify_roundtrip(self):
+        key = AsymmetricEncryption()
+        msg = b"Thalos Prime sync payload"
+        sig = key.sign(msg)
+        assert key.verify(msg, sig) is True
+
+    def test_verify_tampered_message_fails(self):
+        key = AsymmetricEncryption()
+        msg = b"original message"
+        sig = key.sign(msg)
+        assert key.verify(b"tampered message", sig) is False
+
+    def test_verify_with_public_pem(self):
+        key = AsymmetricEncryption()
+        msg = b"inter-node payload"
+        sig = key.sign(msg)
+        pub_pem = key.public_key_pem()
+        assert AsymmetricEncryption.verify_with_public_pem(msg, sig, pub_pem) is True
+
+    def test_verify_with_wrong_key_fails(self):
+        key1 = AsymmetricEncryption()
+        key2 = AsymmetricEncryption()
+        msg = b"signed with key1"
+        sig = key1.sign(msg)
+        # Verify with key2's public key must fail
+        assert AsymmetricEncryption.verify_with_public_pem(msg, sig, key2.public_key_pem()) is False
+
+    def test_signature_is_bytes(self):
+        key = AsymmetricEncryption()
+        sig = key.sign(b"data")
+        assert isinstance(sig, bytes)
+        assert len(sig) == 256  # RSA-2048 signature = 256 bytes
+
+
+class TestNodeSynchronizerWithSigning:
+    def test_signed_message_carries_signature(self):
+        key = AsymmetricEncryption()
+        local = make_node()
+        sync = NodeSynchronizer(local_node=local, signing_key=key)
+        encrypted = sync.prepare_sync_message([{"object_id": "x", "content": "test"}])
+        msg = sync.parse_sync_message(encrypted)
+        assert msg is not None
+        assert msg.signature != ""
+
+    def test_unsigned_message_is_accepted(self):
+        """Nodes without a signing key still produce valid (unsigned) messages."""
+        local = make_node()
+        sync = NodeSynchronizer(local_node=local, signing_key=None)
+        encrypted = sync.prepare_sync_message([{"object_id": "y", "content": "data"}])
+        msg = sync.parse_sync_message(encrypted)
+        assert msg is not None
+        assert msg.signature == ""
+
+    def test_valid_signature_verified_when_public_key_known(self):
+        signing_key = AsymmetricEncryption()
+        local = make_node()
+        # Sender signs
+        sender = NodeSynchronizer(local_node=local, signing_key=signing_key)
+        encrypted = sender.prepare_sync_message([{"object_id": "z", "content": "fact"}])
+        # Receiver knows the sender's public key
+        receiver = NodeSynchronizer(
+            local_node=local,
+            shared_key=sender.shared_key,
+            public_key_store={local.node_id: signing_key.public_key_pem()},
+        )
+        msg = receiver.parse_sync_message(encrypted)
+        assert msg is not None
+
+    def test_tampered_signature_rejected(self):
+        import base64
+        import json
+
+        signing_key = AsymmetricEncryption()
+        local = make_node()
+        sender = NodeSynchronizer(local_node=local, signing_key=signing_key)
+        encrypted = sender.prepare_sync_message([{"object_id": "q", "content": "claim"}])
+
+        # Decrypt, swap signature to garbage, re-encrypt
+        from thalos_prime.autonomy.encryption import SymmetricEncryption
+        sym = SymmetricEncryption(key=sender.shared_key)
+        raw = sym.decrypt(encrypted, aad=local.node_id.encode())
+        data = json.loads(raw)
+        data["signature"] = base64.b64encode(b"fakesig" * 37).decode()
+        tampered_raw = json.dumps(data).encode()
+        tampered_encrypted = sym.encrypt(tampered_raw, aad=local.node_id.encode())
+
+        receiver = NodeSynchronizer(
+            local_node=local,
+            shared_key=sender.shared_key,
+            public_key_store={local.node_id: signing_key.public_key_pem()},
+        )
+        msg = receiver.parse_sync_message(tampered_encrypted)
+        assert msg is None  # must be rejected
+
+    def test_sync_log_records_signed_flag(self):
+        signing_key = AsymmetricEncryption()
+        local = make_node()
+        sync = NodeSynchronizer(local_node=local, signing_key=signing_key)
+        sync.prepare_sync_message([])
+        log = sync.sync_log
+        assert log[0]["signed"] is True
+
+
+class TestNodeRegistryGetPeer:
+    def test_get_peer_returns_node(self):
+        local = make_node()
+        registry = NodeRegistry(local_node=local)
+        peer = make_node(port=9099)
+        registry.register(peer)
+        found = registry.get_peer(peer.node_id)
+        assert found is peer
+
+    def test_get_peer_unknown_returns_none(self):
+        local = make_node()
+        registry = NodeRegistry(local_node=local)
+        assert registry.get_peer("nonexistent-id") is None
